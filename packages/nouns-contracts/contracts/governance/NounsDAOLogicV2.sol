@@ -357,6 +357,24 @@ contract NounsDAOLogicV2 is NounsDAOStorageV2, NounsDAOEventsV2 {
      * @param proposalId The id of the proposal to cancel
      */
     function cancel(uint256 proposalId) external {
+        _cancelProposal(proposalId, '');
+    }
+
+    /**
+     * @notice Cancels a proposal only if sender is the proposer, or proposer delegates dropped below proposal threshold
+     * @param proposalId The id of the proposal to cancel
+     * @param reason The reason given for the cancellation by the proposer
+     */
+    function cancelWithReason(uint256 proposalId, string calldata reason) external {
+        _cancelProposal(proposalId, reason);
+    }
+
+    /**
+     * @notice Internal function that carries out proposal cancelation logic
+     * @param proposalId The id of the proposal to cancel
+     * @param reason The reason given for the cancellation by the proposer
+     */
+    function _cancelProposal(uint256 proposalId, string memory reason) internal {
         if (state(proposalId) == ProposalState.Executed) {
             revert CantCancelExecutedProposal();
         }
@@ -379,7 +397,7 @@ contract NounsDAOLogicV2 is NounsDAOStorageV2, NounsDAOEventsV2 {
             );
         }
 
-        emit ProposalCanceled(proposalId);
+        emit ProposalCanceled(proposalId, reason);
     }
 
     /**

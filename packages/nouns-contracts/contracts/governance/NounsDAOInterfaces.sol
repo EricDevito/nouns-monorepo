@@ -70,7 +70,8 @@ contract NounsDAOEvents {
     event VoteCast(address indexed voter, uint256 proposalId, uint8 support, uint256 votes, string reason);
 
     /// @notice An event emitted when a proposal has been canceled
-    event ProposalCanceled(uint256 id);
+    /// @param reason The reason given for the cancellation by the proposer
+    event ProposalCanceled(uint256 id, string reason);
 
     /// @notice An event emitted when a proposal has been queued in the NounsDAOExecutor
     event ProposalQueued(uint256 id, uint256 eta);
