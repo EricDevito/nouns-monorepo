@@ -6,8 +6,6 @@ export {
   NounsAuctionHouseABI,
   NounsDescriptorABI,
   NounsSeederABI,
-  NounsDAOABI,
-  NounsDAOV2ABI,
   NounsDAOV3ABI,
   NounsDAOExecutorV2ABI,
   NounsTokenFactory,
@@ -15,8 +13,6 @@ export {
   NounsAuctionHouseV2Factory,
   NounsDescriptorFactory,
   NounsSeederFactory,
-  NounsDaoLogicV1Factory,
-  NounsDaoLogicV2Factory,
-  NounsDaoLogicV3Factory,
+  NounsDaoLogicFactory,
   NounsDaoExecutorV2Factory,
 } from '@nouns/contracts';

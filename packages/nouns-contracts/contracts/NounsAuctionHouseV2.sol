@@ -22,7 +22,7 @@
 // AuctionHouse.sol source code Copyright Zora licensed under the GPL-3.0 license.
 // With modifications by Nounders DAO.
 
-pragma solidity ^0.8.6;
+pragma solidity ^0.8.19;
 
 import { PausableUpgradeable } from '@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol';
 import { ReentrancyGuardUpgradeable } from '@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol';
@@ -32,27 +32,48 @@ import { INounsAuctionHouseV2 } from './interfaces/INounsAuctionHouseV2.sol';
 import { INounsToken } from './interfaces/INounsToken.sol';
 import { IWETH } from './interfaces/IWETH.sol';
 
-contract NounsAuctionHouseV2 is INounsAuctionHouseV2, PausableUpgradeable, ReentrancyGuardUpgradeable, OwnableUpgradeable {
-    // The Nouns ERC721 token contract
-    INounsToken public nouns;
+/**
+ * @dev The contract inherits from PausableUpgradeable & ReentrancyGuardUpgradeable most of all the keep the same
+ * storage layout as the NounsAuctionHouse contract
+ */
+contract NounsAuctionHouseV2 is
+    INounsAuctionHouseV2,
+    PausableUpgradeable,
+    ReentrancyGuardUpgradeable,
+    OwnableUpgradeable
+{
+    /// @notice A hard-coded cap on time buffer to prevent accidental auction disabling if set with a very high value.
+    uint56 public constant MAX_TIME_BUFFER = 1 days;
 
-    // The address of the WETH contract
-    address public weth;
+    /// @notice The Nouns ERC721 token contract
+    INounsToken public immutable nouns;
 
-    // The minimum amount of time left in an auction after a new bid is created
-    uint256 public timeBuffer;
+    /// @notice The address of the WETH contract
+    address public immutable weth;
 
-    // The minimum price accepted in an auction
-    uint256 public reservePrice;
+    /// @notice The duration of a single auction
+    uint256 public immutable duration;
 
-    // The minimum percentage difference between the last bid amount and the current bid
+    /// @notice The minimum price accepted in an auction
+    uint192 public reservePrice;
+
+    /// @notice The minimum amount of time left in an auction after a new bid is created
+    uint56 public timeBuffer;
+
+    /// @notice The minimum percentage difference between the last bid amount and the current bid
     uint8 public minBidIncrementPercentage;
 
-    // The duration of a single auction
-    uint256 public duration;
+    /// @notice The active auction
+    INounsAuctionHouseV2.AuctionV2 public auctionStorage;
 
-    // The active auction
-    INounsAuctionHouseV2.Auction public auction;
+    /// @notice The Nouns price feed state
+    mapping(uint256 => SettlementState) settlementHistory;
+
+    constructor(INounsToken _nouns, address _weth, uint256 _duration) initializer {
+        nouns = _nouns;
+        weth = _weth;
+        duration = _duration;
+    }
 
     /**
      * @notice Initialize the auction house and base contracts,
@@ -60,12 +81,9 @@ contract NounsAuctionHouseV2 is INounsAuctionHouseV2, PausableUpgradeable, Reent
      * @dev This function can only be called once.
      */
     function initialize(
-        INounsToken _nouns,
-        address _weth,
-        uint256 _timeBuffer,
-        uint256 _reservePrice,
-        uint8 _minBidIncrementPercentage,
-        uint256 _duration
+        uint192 _reservePrice,
+        uint56 _timeBuffer,
+        uint8 _minBidIncrementPercentage
     ) external initializer {
         __Pausable_init();
         __ReentrancyGuard_init();
@@ -73,18 +91,15 @@ contract NounsAuctionHouseV2 is INounsAuctionHouseV2, PausableUpgradeable, Reent
 
         _pause();
 
-        nouns = _nouns;
-        weth = _weth;
-        timeBuffer = _timeBuffer;
         reservePrice = _reservePrice;
+        timeBuffer = _timeBuffer;
         minBidIncrementPercentage = _minBidIncrementPercentage;
-        duration = _duration;
     }
 
     /**
      * @notice Settle the current auction, mint a new Noun, and put it up for auction.
      */
-    function settleCurrentAndCreateNewAuction() external override nonReentrant whenNotPaused {
+    function settleCurrentAndCreateNewAuction() external override whenNotPaused {
         _settleAuction();
         _createAuction();
     }
@@ -93,7 +108,7 @@ contract NounsAuctionHouseV2 is INounsAuctionHouseV2, PausableUpgradeable, Reent
      * @notice Settle the current auction.
      * @dev This function can only be called when the contract is paused.
      */
-    function settleAuction() external override whenPaused nonReentrant {
+    function settleAuction() external override whenPaused {
         _settleAuction();
     }
 
@@ -101,16 +116,69 @@ contract NounsAuctionHouseV2 is INounsAuctionHouseV2, PausableUpgradeable, Reent
      * @notice Create a bid for a Noun, with a given amount.
      * @dev This contract only accepts payment in ETH.
      */
-    function createBid(uint256 nounId) external payable override nonReentrant {
-        _createBid(nounId, '');
+    function createBid(uint256 nounId) external payable override {
+        createBid(nounId, 0);
     }
 
     /**
-     * @notice Create a bid for a Noun, with a given amount and comment.
+     * @notice Create a bid for a Noun, with a given amount.
+     * @param nounId id of the Noun to bid on
+     * @param clientId the client which facilitate this action
      * @dev This contract only accepts payment in ETH.
      */
-    function createBidWithComment(uint256 nounId, string calldata comment) external payable override nonReentrant {
-        _createBid(nounId, comment);
+    function createBid(uint256 nounId, uint32 clientId) public payable override {
+        INounsAuctionHouseV2.AuctionV2 memory _auction = auctionStorage;
+
+        (uint192 _reservePrice, uint56 _timeBuffer, uint8 _minBidIncrementPercentage) = (
+            reservePrice,
+            timeBuffer,
+            minBidIncrementPercentage
+        );
+
+        require(_auction.nounId == nounId, 'Noun not up for auction');
+        require(block.timestamp < _auction.endTime, 'Auction expired');
+        require(msg.value >= _reservePrice, 'Must send at least reservePrice');
+        require(
+            msg.value >= _auction.amount + ((_auction.amount * _minBidIncrementPercentage) / 100),
+            'Must send more than last bid by minBidIncrementPercentage amount'
+        );
+
+        auctionStorage.clientId = clientId;
+        auctionStorage.amount = uint128(msg.value);
+        auctionStorage.bidder = payable(msg.sender);
+
+        // Extend the auction if the bid was received within `timeBuffer` of the auction end time
+        bool extended = _auction.endTime - block.timestamp < _timeBuffer;
+
+        emit AuctionBid(_auction.nounId, msg.sender, msg.value, extended);
+        if (clientId > 0) emit AuctionBidWithClientId(_auction.nounId, msg.value, clientId);
+
+        if (extended) {
+            auctionStorage.endTime = _auction.endTime = uint40(block.timestamp + _timeBuffer);
+            emit AuctionExtended(_auction.nounId, _auction.endTime);
+        }
+
+        address payable lastBidder = _auction.bidder;
+
+        // Refund the last bidder, if applicable
+        if (lastBidder != address(0)) {
+            _safeTransferETHWithFallback(lastBidder, _auction.amount);
+        }
+    }
+
+    /**
+     * @notice Get the current auction.
+     */
+    function auction() external view returns (AuctionV2View memory) {
+        return
+            AuctionV2View({
+                nounId: auctionStorage.nounId,
+                amount: auctionStorage.amount,
+                startTime: auctionStorage.startTime,
+                endTime: auctionStorage.endTime,
+                bidder: auctionStorage.bidder,
+                settled: auctionStorage.settled
+            });
     }
 
     /**
@@ -131,7 +199,7 @@ contract NounsAuctionHouseV2 is INounsAuctionHouseV2, PausableUpgradeable, Reent
     function unpause() external override onlyOwner {
         _unpause();
 
-        if (auction.startTime == 0 || auction.settled) {
+        if (auctionStorage.startTime == 0 || auctionStorage.settled) {
             _createAuction();
         }
     }
@@ -140,7 +208,9 @@ contract NounsAuctionHouseV2 is INounsAuctionHouseV2, PausableUpgradeable, Reent
      * @notice Set the auction time buffer.
      * @dev Only callable by the owner.
      */
-    function setTimeBuffer(uint256 _timeBuffer) external override onlyOwner {
+    function setTimeBuffer(uint56 _timeBuffer) external override onlyOwner {
+        require(_timeBuffer <= MAX_TIME_BUFFER, 'timeBuffer too large');
+
         timeBuffer = _timeBuffer;
 
         emit AuctionTimeBufferUpdated(_timeBuffer);
@@ -150,7 +220,7 @@ contract NounsAuctionHouseV2 is INounsAuctionHouseV2, PausableUpgradeable, Reent
      * @notice Set the auction reserve price.
      * @dev Only callable by the owner.
      */
-    function setReservePrice(uint256 _reservePrice) external override onlyOwner {
+    function setReservePrice(uint192 _reservePrice) external override onlyOwner {
         reservePrice = _reservePrice;
 
         emit AuctionReservePriceUpdated(_reservePrice);
@@ -161,51 +231,11 @@ contract NounsAuctionHouseV2 is INounsAuctionHouseV2, PausableUpgradeable, Reent
      * @dev Only callable by the owner.
      */
     function setMinBidIncrementPercentage(uint8 _minBidIncrementPercentage) external override onlyOwner {
+        require(_minBidIncrementPercentage > 0, 'must be greater than zero');
+
         minBidIncrementPercentage = _minBidIncrementPercentage;
 
         emit AuctionMinBidIncrementPercentageUpdated(_minBidIncrementPercentage);
-    }
-
-    /**
-     * @notice Create a bid for a Noun, with a given amount and optional comment.
-     * @dev This contract only accepts payment in ETH.
-     */
-    function _createBid(uint256 nounId, string memory comment) internal {
-        INounsAuctionHouseV2.Auction memory _auction = auction;
-
-        require(_auction.nounId == nounId, 'Noun not up for auction');
-        require(block.timestamp < _auction.endTime, 'Auction expired');
-        require(msg.value >= reservePrice, 'Must send at least reservePrice');
-        require(
-            msg.value >= _auction.amount + ((_auction.amount * minBidIncrementPercentage) / 100),
-            'Must send more than last bid by minBidIncrementPercentage amount'
-        );
-
-        address payable lastBidder = _auction.bidder;
-
-        // Refund the last bidder, if applicable
-        if (lastBidder != address(0)) {
-            _safeTransferETHWithFallback(lastBidder, _auction.amount);
-        }
-
-        auction.amount = msg.value;
-        auction.bidder = payable(msg.sender);
-
-        // Extend the auction if the bid was received within `timeBuffer` of the auction end time
-        bool extended = _auction.endTime - block.timestamp < timeBuffer;
-        if (extended) {
-            auction.endTime = _auction.endTime = block.timestamp + timeBuffer;
-        }
-
-        emit AuctionBid(_auction.nounId, msg.sender, msg.value, extended);
-
-        if (bytes(comment).length > 0) {
-            emit AuctionBidComment(comment);
-        }
-
-        if (extended) {
-            emit AuctionExtended(_auction.nounId, _auction.endTime);
-        }
     }
 
     /**
@@ -216,11 +246,12 @@ contract NounsAuctionHouseV2 is INounsAuctionHouseV2, PausableUpgradeable, Reent
      */
     function _createAuction() internal {
         try nouns.mint() returns (uint256 nounId) {
-            uint256 startTime = block.timestamp;
-            uint256 endTime = startTime + duration;
+            uint40 startTime = uint40(block.timestamp);
+            uint40 endTime = startTime + uint40(duration);
 
-            auction = Auction({
-                nounId: nounId,
+            auctionStorage = AuctionV2({
+                nounId: uint96(nounId),
+                clientId: 0,
                 amount: 0,
                 startTime: startTime,
                 endTime: endTime,
@@ -239,13 +270,13 @@ contract NounsAuctionHouseV2 is INounsAuctionHouseV2, PausableUpgradeable, Reent
      * @dev If there are no bids, the Noun is burned.
      */
     function _settleAuction() internal {
-        INounsAuctionHouseV2.Auction memory _auction = auction;
+        INounsAuctionHouseV2.AuctionV2 memory _auction = auctionStorage;
 
         require(_auction.startTime != 0, "Auction hasn't begun");
         require(!_auction.settled, 'Auction has already been settled');
         require(block.timestamp >= _auction.endTime, "Auction hasn't completed");
 
-        auction.settled = true;
+        auctionStorage.settled = true;
 
         if (_auction.bidder == address(0)) {
             nouns.burn(_auction.nounId);
@@ -257,7 +288,14 @@ contract NounsAuctionHouseV2 is INounsAuctionHouseV2, PausableUpgradeable, Reent
             _safeTransferETHWithFallback(owner(), _auction.amount);
         }
 
+        SettlementState storage settlementState = settlementHistory[_auction.nounId];
+        settlementState.blockTimestamp = uint32(block.timestamp);
+        settlementState.amount = ethPriceToUint64(_auction.amount);
+        settlementState.winner = _auction.bidder;
+        if (_auction.clientId > 0) settlementState.clientId = _auction.clientId;
+
         emit AuctionSettled(_auction.nounId, _auction.bidder, _auction.amount);
+        if (_auction.clientId > 0) emit AuctionSettledWithClientId(_auction.nounId, _auction.clientId);
     }
 
     /**
@@ -275,7 +313,243 @@ contract NounsAuctionHouseV2 is INounsAuctionHouseV2, PausableUpgradeable, Reent
      * @dev This function only forwards 30,000 gas to the callee.
      */
     function _safeTransferETH(address to, uint256 value) internal returns (bool) {
-        (bool success, ) = to.call{ value: value, gas: 30_000 }(new bytes(0));
+        bool success;
+        assembly {
+            success := call(30000, to, value, 0, 0, 0, 0)
+        }
         return success;
+    }
+
+    /**
+     * @notice Set historic prices; only callable by the owner, which in Nouns is the treasury (timelock) contract.
+     * @dev This function lowers auction price accuracy from 18 decimals to 10 decimals, as part of the price history
+     * bit packing, to save gas.
+     * @param settlements The list of historic prices to set.
+     */
+    function setPrices(SettlementNoClientId[] memory settlements) external onlyOwner {
+        for (uint256 i = 0; i < settlements.length; ++i) {
+            SettlementState storage settlementState = settlementHistory[settlements[i].nounId];
+            settlementState.blockTimestamp = settlements[i].blockTimestamp;
+            settlementState.amount = ethPriceToUint64(settlements[i].amount);
+            settlementState.winner = settlements[i].winner;
+        }
+    }
+
+    /**
+     * @notice Warm up the settlement state for a range of Noun IDs.
+     * @dev Helps lower the gas cost of auction settlement when storing settlement data
+     * thanks to the state slot being non-zero.
+     * @dev Only writes to slots where blockTimestamp is zero, meaning it will not overwrite existing data.
+     * @dev Skips Nounder reward nouns.
+     * @param startId the first Noun ID to warm up.
+     * @param endId end Noun ID (up to, but not including).
+     */
+    function warmUpSettlementState(uint256 startId, uint256 endId) external {
+        for (uint256 i = startId; i < endId; ++i) {
+            // Skipping Nounder rewards, no need to warm up those slots since they are never used.
+            if (i <= 1820 && i % 10 == 0) continue;
+
+            SettlementState storage settlementState = settlementHistory[i];
+            if (settlementState.blockTimestamp == 0) {
+                settlementState.blockTimestamp = 1;
+                settlementState.slotWarmedUp = true;
+            }
+        }
+    }
+
+    /**
+     * @notice Get past auction settlements.
+     * @dev Returns up to `auctionCount` settlements in reverse order, meaning settlements[0] will be the most recent auction price.
+     * Includes auctions with no bids (blockTimestamp will be > 1)
+     * @param auctionCount The number of price observations to get.
+     * @param skipEmptyValues if true, skips nounder reward ids and ids with missing data
+     * @return settlements An array of type `Settlement`, where each Settlement includes a timestamp,
+     * the Noun ID of that auction, the winning bid amount, and the winner's address.
+     */
+    function getSettlements(
+        uint256 auctionCount,
+        bool skipEmptyValues
+    ) external view returns (Settlement[] memory settlements) {
+        uint256 latestNounId = auctionStorage.nounId;
+        if (!auctionStorage.settled && latestNounId > 0) {
+            latestNounId -= 1;
+        }
+
+        settlements = new Settlement[](auctionCount);
+        uint256 actualCount = 0;
+
+        SettlementState memory settlementState;
+        for (uint256 id = latestNounId; actualCount < auctionCount; --id) {
+            settlementState = settlementHistory[id];
+
+            if (skipEmptyValues && settlementState.blockTimestamp <= 1) {
+                if (id == 0) break;
+                continue;
+            }
+
+            settlements[actualCount] = Settlement({
+                blockTimestamp: settlementState.blockTimestamp,
+                amount: uint64PriceToUint256(settlementState.amount),
+                winner: settlementState.winner,
+                nounId: id,
+                clientId: settlementState.clientId
+            });
+            ++actualCount;
+
+            if (id == 0) break;
+        }
+
+        if (auctionCount > actualCount) {
+            // this assembly trims the observations array, getting rid of unused cells
+            assembly {
+                mstore(settlements, actualCount)
+            }
+        }
+    }
+
+    /**
+     * @notice Get past auction prices.
+     * @dev Returns prices in reverse order, meaning prices[0] will be the most recent auction price.
+     * Skips auctions where there was no winner, i.e. no bids.
+     * Skips nounder rewards noun ids.
+     * Reverts if getting a empty data for an auction that happened, e.g. historic data not filled
+     * Reverts if there's not enough auction data, i.e. reached noun id 0
+     * @param auctionCount The number of price observations to get.
+     * @return prices An array of uint256 prices.
+     */
+    function getPrices(uint256 auctionCount) external view returns (uint256[] memory prices) {
+        uint256 latestNounId = auctionStorage.nounId;
+        if (!auctionStorage.settled && latestNounId > 0) {
+            latestNounId -= 1;
+        }
+
+        prices = new uint256[](auctionCount);
+        uint256 actualCount = 0;
+
+        SettlementState memory settlementState;
+        for (uint256 id = latestNounId; id > 0 && actualCount < auctionCount; --id) {
+            if (id <= 1820 && id % 10 == 0) continue; // Skip Nounder reward nouns
+
+            settlementState = settlementHistory[id];
+            require(settlementState.blockTimestamp > 1, 'Missing data');
+            if (settlementState.winner == address(0)) continue; // Skip auctions with no bids
+
+            prices[actualCount] = uint64PriceToUint256(settlementState.amount);
+            ++actualCount;
+        }
+
+        require(auctionCount == actualCount, 'Not enough history');
+    }
+
+    /**
+     * @notice Get all past auction settlements starting at `startId` and settled before or at `endTimestamp`.
+     * @param startId the first Noun ID to get prices for.
+     * @param endTimestamp the latest timestamp for auctions
+     * @param skipEmptyValues if true, skips nounder reward ids and ids with missing data
+     * @return settlements An array of type `Settlement`, where each Settlement includes a timestamp,
+     * the Noun ID of that auction, the winning bid amount, and the winner's address.
+     */
+    function getSettlementsFromIdtoTimestamp(
+        uint256 startId,
+        uint256 endTimestamp,
+        bool skipEmptyValues
+    ) public view returns (Settlement[] memory settlements) {
+        uint256 maxId = auctionStorage.nounId;
+        require(startId <= maxId, 'startId too large');
+        settlements = new Settlement[](maxId - startId + 1);
+        uint256 actualCount = 0;
+        SettlementState memory settlementState;
+        for (uint256 id = startId; id <= maxId; ++id) {
+            settlementState = settlementHistory[id];
+
+            if (skipEmptyValues && settlementState.blockTimestamp <= 1) continue;
+
+            // don't include the currently auctioned noun if it hasn't settled
+            if ((id == maxId) && (settlementState.blockTimestamp <= 1)) continue;
+
+            if (settlementState.blockTimestamp > endTimestamp) break;
+
+            settlements[actualCount] = Settlement({
+                blockTimestamp: settlementState.blockTimestamp,
+                amount: uint64PriceToUint256(settlementState.amount),
+                winner: settlementState.winner,
+                nounId: id,
+                clientId: settlementState.clientId
+            });
+            ++actualCount;
+        }
+
+        if (settlements.length > actualCount) {
+            // this assembly trims the settlements array, getting rid of unused cells
+            assembly {
+                mstore(settlements, actualCount)
+            }
+        }
+    }
+
+    /**
+     * @notice Get a range of past auction settlements.
+     * @dev Returns prices in chronological order, as opposed to `getSettlements(count)` which returns prices in reverse order.
+     * Includes auctions with no bids (blockTimestamp will be > 1)
+     * @param startId the first Noun ID to get prices for.
+     * @param endId end Noun ID (up to, but not including).
+     * @param skipEmptyValues if true, skips nounder reward ids and ids with missing data
+     * @return settlements An array of type `Settlement`, where each Settlement includes a timestamp,
+     * the Noun ID of that auction, the winning bid amount, and the winner's address.
+     */
+    function getSettlements(
+        uint256 startId,
+        uint256 endId,
+        bool skipEmptyValues
+    ) external view returns (Settlement[] memory settlements) {
+        settlements = new Settlement[](endId - startId);
+        uint256 actualCount = 0;
+
+        SettlementState memory settlementState;
+        for (uint256 id = startId; id < endId; ++id) {
+            settlementState = settlementHistory[id];
+
+            if (skipEmptyValues && settlementState.blockTimestamp <= 1) continue;
+
+            settlements[actualCount] = Settlement({
+                blockTimestamp: settlementState.blockTimestamp,
+                amount: uint64PriceToUint256(settlementState.amount),
+                winner: settlementState.winner,
+                nounId: id,
+                clientId: settlementState.clientId
+            });
+            ++actualCount;
+        }
+
+        if (settlements.length > actualCount) {
+            // this assembly trims the settlements array, getting rid of unused cells
+            assembly {
+                mstore(settlements, actualCount)
+            }
+        }
+    }
+
+    /***
+     * @notice Get the client ID that facilitated the winning bid for a Noun. Returns 0 if there is no settlement data
+     * for the Noun in question, or if the winning bid was not facilitated by a registered client.
+     */
+    function biddingClient(uint256 nounId) external view returns (uint32) {
+        return settlementHistory[nounId].clientId;
+    }
+
+    /**
+     * @dev Convert an ETH price of 256 bits with 18 decimals, to 64 bits with 10 decimals.
+     * Max supported value is 1844674407.3709551615 ETH.
+     *
+     */
+    function ethPriceToUint64(uint256 ethPrice) internal pure returns (uint64) {
+        return uint64(ethPrice / 1e8);
+    }
+
+    /**
+     * @dev Convert a 64 bit 10 decimal price to a 256 bit 18 decimal price.
+     */
+    function uint64PriceToUint256(uint64 price) internal pure returns (uint256) {
+        return uint256(price) * 1e8;
     }
 }

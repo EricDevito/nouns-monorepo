@@ -3,9 +3,7 @@ export { default as NounsAuctionHouseABI } from '../abi/contracts/NounsAuctionHo
 export { default as NounsAuctionHouseV2ABI } from '../abi/contracts/NounsAuctionHouseV2.sol/NounsAuctionHouseV2.json';
 export { default as NounsDescriptorABI } from '../abi/contracts/NounsDescriptor.sol/NounsDescriptor.json';
 export { default as NounsSeederABI } from '../abi/contracts/NounsSeeder.sol/NounsSeeder.json';
-export { default as NounsDAOABI } from '../abi/contracts/governance/NounsDAOLogicV1.sol/NounsDAOLogicV1.json';
-export { default as NounsDAOV2ABI } from '../abi/contracts/governance/NounsDAOLogicV2.sol/NounsDAOLogicV2.json';
-export { default as NounsDAOV3ABI } from '../abi/contracts/governance/NounsDAOLogicV3.sol/NounsDAOLogicV3.json';
+export { default as NounsDAOV3ABI } from '../abi/contracts/governance/NounsDAOLogicV4.json';
 export { default as NounsDAODataABI } from '../abi/contracts/governance/data/NounsDAOData.sol/NounsDAOData.json';
 export { default as NounsDAOExecutorV2ABI } from '../abi/contracts/governance/NounsDAOExecutorV2.sol/NounsDAOExecutorV2.json';
 export { NounsToken__factory as NounsTokenFactory } from '../typechain/factories/contracts/NounsToken__factory';
@@ -13,8 +11,6 @@ export { NounsAuctionHouse__factory as NounsAuctionHouseFactory } from '../typec
 export { NounsAuctionHouseV2__factory as NounsAuctionHouseV2Factory } from '../typechain/factories/contracts/NounsAuctionHouseV2__factory';
 export { NounsDescriptor__factory as NounsDescriptorFactory } from '../typechain/factories/contracts/NounsDescriptor__factory';
 export { NounsSeeder__factory as NounsSeederFactory } from '../typechain/factories/contracts/NounsSeeder__factory';
-export { NounsDAOLogicV1__factory as NounsDaoLogicV1Factory } from '../typechain/factories/contracts/governance/NounsDAOLogicV1__factory';
-export { NounsDAOLogicV2__factory as NounsDaoLogicV2Factory } from '../typechain/factories/contracts/governance/NounsDAOLogicV2__factory';
-export { NounsDAOLogicV3__factory as NounsDaoLogicV3Factory } from '../typechain/factories/contracts/governance/NounsDAOLogicV3__factory';
+export { NounsDAOLogicV4__factory as NounsDaoLogicFactory } from '../typechain/factories/contracts/governance/NounsDAOLogicV4__factory';
 export { NounsDAOData__factory as NounsDaoDataFactory } from '../typechain/factories/contracts/governance/data/NounsDAOData.sol/NounsDAOData__factory';
 export { NounsDAOExecutorV2__factory as NounsDaoExecutorV2Factory } from '../typechain/factories/contracts/governance/NounsDAOExecutorV2__factory';
